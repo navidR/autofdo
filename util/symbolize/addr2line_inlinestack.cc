@@ -335,7 +335,16 @@ void InlineStackHandler::ProcessAttributeUnsigned(
       case DW_AT_ranges: {
         CHECK_EQ(0, subprogram_stack_.back()->address_ranges()->size());
         AddressRangeList::RangeList ranges;
-        address_ranges_->ReadRangeList(data, compilation_unit_base_, &ranges);
+
+        // TODO: check that it's  DW_FORM_data4 and DW_FORM_data8 for earlier DWARF versions.
+        if (form == DW_FORM_sec_offset) {
+            address_ranges_->ReadRangeList(data, compilation_unit_base_, &ranges);
+        }
+        else {
+            CHECK(form == DW_FORM_rnglistx);
+            // TODO
+            CHECK(0);
+        }
 
         if (subprogram_stack_.size() == 1) {
           if (sampled_functions_ != NULL) {

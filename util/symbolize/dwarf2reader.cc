@@ -30,27 +30,6 @@
 
 namespace devtools_crosstool_autofdo {
 
-// Read a DWARF2/3 initial length field from START, using READER, and
-// report the length in LEN.  Return the actual initial length.
-
-static uint64 ReadInitialLength(const char* start,
-                                ByteReader* reader, size_t* len) {
-  const uint64 initial_length = reader->ReadFourBytes(start);
-  start += 4;
-
-  // In DWARF2/3, if the initial length is all 1 bits, then the offset
-  // size is 8 and we need to read the next 8 bytes for the real length.
-  if (initial_length == 0xffffffff) {
-    reader->SetOffsetSize(8);
-    *len = 12;
-    return reader->ReadOffset(start);
-  } else {
-    reader->SetOffsetSize(4);
-    *len = 4;
-  }
-  return initial_length;
-}
-
 CompilationUnit::CompilationUnit(const string& path,
                                  const SectionMap& sections, uint64 offset,
                                  ByteReader* reader, Dwarf2Handler* handler)
@@ -167,7 +146,20 @@ void CompilationUnit::ReadAbbrevs() {
       const enum DwarfAttribute name =
         static_cast<enum DwarfAttribute>(nametemp);
       const enum DwarfForm form = static_cast<enum DwarfForm>(formtemp);
-      abbrev.attributes.push_back(std::make_pair(name, form));
+      uint32 value = 0;
+      if (form == DW_FORM_implicit_const)
+      {
+          DCHECK(abbrevptr < abbrev_start + abbrev_length);
+          value = reader_->ReadUnsignedLEB128(abbrevptr, &len);
+          abbrevptr += len;
+      }
+
+      AttributeSpec spec;
+      spec.name = name;
+      spec.form = form;
+      spec.value = value;
+
+      abbrev.attributes.push_back(spec);
     }
     CHECK(abbrev.number == abbrevs_->size());
     abbrevs_->push_back(abbrev);
@@ -180,7 +172,7 @@ const char* CompilationUnit::SkipDIE(const char* start,
   for (AttributeList::const_iterator i = abbrev.attributes.begin();
        i != abbrev.attributes.end();
        i++)  {
-    start = SkipAttribute(start, i->second);
+    start = SkipAttribute(start, i->form);
   }
   return start;
 }
@@ -199,26 +191,42 @@ const char* CompilationUnit::SkipAttribute(const char* start,
       break;
 
     case DW_FORM_flag_present:
+    case DW_FORM_implicit_const:
       return start;
       break;
 
     case DW_FORM_data1:
     case DW_FORM_flag:
     case DW_FORM_ref1:
+    case DW_FORM_strx1:
+    case DW_FORM_addrx1:
       return start + 1;
       break;
     case DW_FORM_ref2:
     case DW_FORM_data2:
+    case DW_FORM_strx2:
+    case DW_FORM_addrx2:
       return start + 2;
+      break;
+    case DW_FORM_strx3:
+    case DW_FORM_addrx3:
+      return start + 3;
       break;
     case DW_FORM_ref4:
     case DW_FORM_data4:
+    case DW_FORM_strx4:
+    case DW_FORM_addrx4:
+    case DW_FORM_ref_sup4:
       return start + 4;
       break;
     case DW_FORM_ref8:
     case DW_FORM_ref_sig8:
     case DW_FORM_data8:
+    case DW_FORM_ref_sup8:
       return start + 8;
+      break;
+    case DW_FORM_data16:
+      return start + 16;
       break;
     case DW_FORM_string:
       return start + strlen(start) + 1;
@@ -227,6 +235,10 @@ const char* CompilationUnit::SkipAttribute(const char* start,
     case DW_FORM_ref_udata:
     case DW_FORM_GNU_str_index:
     case DW_FORM_GNU_addr_index:
+    case DW_FORM_strx:
+    case DW_FORM_addrx:
+    case DW_FORM_loclistx:
+    case DW_FORM_rnglistx:
       reader_->ReadUnsignedLEB128(start, &len);
       return start + len;
       break;
@@ -264,6 +276,7 @@ const char* CompilationUnit::SkipAttribute(const char* start,
     }
       break;
     case DW_FORM_strp:
+    case DW_FORM_strp_sup:
     case DW_FORM_sec_offset:
         return start + reader_->OffsetSize();
       break;
@@ -287,8 +300,7 @@ void CompilationUnit::ReadHeader() {
     malformed_ = true;
     return;
   }
-  const uint64 initial_length = ReadInitialLength(headerptr, reader_,
-                                                  &initial_length_size);
+  const uint64 initial_length = reader_->ReadInitialLength(headerptr, &initial_length_size);
   headerptr += initial_length_size;
   header_.length = initial_length;
   if (header_.length == 0
@@ -298,30 +310,51 @@ void CompilationUnit::ReadHeader() {
   }
 
   header_.version = reader_->ReadTwoBytes(headerptr);
-  if (header_.version < 2 || header_.version > 4) {
+  if (header_.version < 2 || header_.version > 5) {
     malformed_ = true;
     return;
   }
   headerptr += 2;
 
-  if (headerptr + reader_->OffsetSize() >= buffer_ + buffer_length_) {
-    malformed_ = true;
-    return;
+  if (header_.version == 5) {
+      if (headerptr + 1 >= buffer_ + buffer_length_) {
+          malformed_ = true;
+          return;
+      }
+      uint8 unit_type = reader_->ReadOneByte(headerptr);
+      // if (unit_type != 1) // Only support DW_UT_compile
+      // {
+      //     LOG(INFO) << "Only full compilation units, partial compilation units, and type units are supported.";
+      //     malformed_ = true;
+      //     return;
+      // }
+      headerptr += 1;
   }
-  header_.abbrev_offset = reader_->ReadOffset(headerptr);
-  headerptr += reader_->OffsetSize();
 
-  if (headerptr + 1 >= buffer_ + buffer_length_) {
-    malformed_ = true;
-    return;
+  if (header_.version == 5)
+  {
+      if (!ReadAddressSize(&headerptr))
+      {
+          return;
+      }
+
+      if (!ReadAbbrevOffset(&headerptr))
+      {
+          return;
+      }
   }
-  header_.address_size = reader_->ReadOneByte(headerptr);
-  if (header_.address_size != 4 && header_.address_size != 8) {
-    malformed_ = true;
-    return;
+  else
+  {
+      if (!ReadAbbrevOffset(&headerptr))
+      {
+          return;
+      }
+
+      if (!ReadAddressSize(&headerptr))
+      {
+          return;
+      }
   }
-  reader_->SetAddressSize(header_.address_size);
-  headerptr += 1;
 
   after_header_ = headerptr;
 
@@ -333,6 +366,33 @@ void CompilationUnit::ReadHeader() {
     malformed_ = true;
     return;
   }
+}
+
+bool CompilationUnit::ReadAddressSize(const char** headerptr)
+{
+    if (*headerptr + 1 >= buffer_ + buffer_length_) {
+        malformed_ = true;
+        return false;
+    }
+    header_.address_size = reader_->ReadOneByte(*headerptr);
+    if (header_.address_size != 4 && header_.address_size != 8) {
+        malformed_ = true;
+        return false;
+    }
+    reader_->SetAddressSize(header_.address_size);
+    *headerptr = *headerptr + 1;
+    return true;
+}
+
+bool CompilationUnit::ReadAbbrevOffset(const char** headerptr)
+{
+    if (*headerptr + reader_->OffsetSize() >= buffer_ + buffer_length_) {
+        malformed_ = true;
+        return false;
+    }
+    header_.abbrev_offset = reader_->ReadOffset(*headerptr);
+    *headerptr = *headerptr + reader_->OffsetSize();
+    return true;
 }
 
 uint64 CompilationUnit::Start(uint64 offset) {
@@ -631,7 +691,7 @@ const char* CompilationUnit::ProcessDIE(uint64 dieoffset,
   for (AttributeList::const_iterator i = abbrev.attributes.begin();
        i != abbrev.attributes.end();
        i++)  {
-    start = ProcessAttribute(dieoffset, start, i->first, i->second);
+    start = ProcessAttribute(dieoffset, start, i->name, i->form);
     if (start == NULL) {
       break;
     }
@@ -1104,14 +1164,13 @@ void LineInfo::ReadHeader() {
   size_t initial_length_size;
   const char* end_of_prologue_length;
 
-  const uint64 initial_length = ReadInitialLength(lineptr, reader_,
-                                                  &initial_length_size);
+  const uint64 initial_length = reader_->ReadInitialLength(lineptr, &initial_length_size);
 
   if (!AdvanceLinePtr(initial_length_size, &lineptr)) {
     return;
   }
-  header_.total_length = initial_length;
-  if (buffer_ + initial_length_size + header_.total_length
+  header_.unit_length = initial_length;
+  if (buffer_ + initial_length_size + header_.unit_length
       > buffer_ + buffer_length_) {
     malformed_ = true;
     return;
@@ -1127,13 +1186,27 @@ void LineInfo::ReadHeader() {
   if (!AdvanceLinePtr(2, &lineptr)) {
     return;
   }
-  if ((header_.version < 2 || header_.version > 4)
+  if ((header_.version < 2 || header_.version > 5)
       && header_.version != VERSION_TWO_LEVEL) {
     malformed_ = true;
     return;
   }
 
-  header_.prologue_length = reader_->ReadOffset(lineptr);
+  // Read DWARF5 Specific field
+  if (header_.version == 5) {
+
+      header_.address_size = reader_->ReadOneByte(lineptr);
+      if (!AdvanceLinePtr(1, &lineptr)) {
+        return;
+      }
+
+      header_.segment_selector_size = reader_->ReadOneByte (lineptr);
+      if (!AdvanceLinePtr (1, &lineptr)) {
+        return;
+      }
+  }
+
+  header_.header_length = reader_->ReadOffset(lineptr);
   if (!AdvanceLinePtr(reader_->OffsetSize(), &lineptr)) {
     return;
   }
@@ -1660,7 +1733,7 @@ void LineInfo::ReadLines() {
     // Read the actuals table;
     handler_->StartActuals();
     lineptr = actuals_start_;
-    while (lineptr < lengthstart + header_.total_length) {
+    while (lineptr < lengthstart + header_.unit_length) {
       lsm.Reset(header_.default_is_stmt);
       while (!lsm.end_sequence) {
         size_t oplength;
@@ -1693,7 +1766,7 @@ void LineInfo::ReadLines() {
     handler_->SetContext(0);
     handler_->SetSubprog(0);
     const char* lineptr = after_header_;
-    while (lineptr < lengthstart + header_.total_length) {
+    while (lineptr < lengthstart + header_.unit_length) {
       lsm.Reset(header_.default_is_stmt);
       while (!lsm.end_sequence) {
         size_t oplength;
@@ -1712,7 +1785,7 @@ void LineInfo::ReadLines() {
     }
   }
 
-  after_header_ = lengthstart + header_.total_length;
+  after_header_ = lengthstart + header_.unit_length;
 }
 
 }  // namespace devtools_crosstool_autofdo

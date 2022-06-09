@@ -93,6 +93,10 @@ class ByteReader {
   // and will CHECK on anything else.
   uint64 ReadAddress(const char* buffer) const;
 
+  // Read a DWARF2/3 initial length field from START, using this reader, and
+  // report the length in LEN.  Return the actual initial length.
+  uint64 ReadInitialLength(const char* start, size_t* len);
+
  private:
   // Function pointer type for our address and offset readers.
   typedef uint64 (ByteReader::*AddressReader)(const char*) const;

@@ -85,6 +85,15 @@ enum DwarfTag {
   DW_TAG_type_unit = 0x41,
   DW_TAG_rvalue_reference_type = 0x42,
   DW_TAG_template_alias = 0x43,
+  // DWARF 5.
+  DW_TAG_coarray_type = 0x44,
+  DW_TAG_generic_subrange = 0x45,
+  DW_TAG_dynamic_type = 0x46,
+  DW_TAG_atomic_type = 0x47,
+  DW_TAG_call_site = 0x48,
+  DW_TAG_call_site_parameter = 0x49,
+  DW_TAG_skeleton_unit = 0x4a,
+  DW_TAG_immutable_type = 0x4b,
   DW_TAG_lo_user = 0x4080,
   DW_TAG_hi_user = 0xffff,
   // SGI/MIPS Extensions.
@@ -150,9 +159,27 @@ enum DwarfForm {
   DW_FORM_exprloc = 0x18,
   DW_FORM_flag_present = 0x19,
   // DWARF 5.
+  DW_FORM_strx = 0x1a,
+  DW_FORM_addrx = 0x1b,
+  DW_FORM_ref_sup4 = 0x1c,
+  DW_FORM_strp_sup = 0x1d,
+  DW_FORM_data16 = 0x1e,
   DW_FORM_line_strp = 0x1f,
   // DWARF 4.
   DW_FORM_ref_sig8 = 0x20,
+  // DWARF 5.
+  DW_FORM_implicit_const = 0x21,
+  DW_FORM_loclistx = 0x22,
+  DW_FORM_rnglistx = 0x23,
+  DW_FORM_ref_sup8 = 0x24,
+  DW_FORM_strx1 = 0x25,
+  DW_FORM_strx2 = 0x26,
+  DW_FORM_strx3 = 0x27,
+  DW_FORM_strx4 = 0x28,
+  DW_FORM_addrx1 = 0x29,
+  DW_FORM_addrx2 = 0x2a,
+  DW_FORM_addrx3 = 0x2b,
+  DW_FORM_addrx4 = 0x2c,
   // Extensions for Fission.  See http://gcc.gnu.org/wiki/DebugFission.
   DW_FORM_GNU_addr_index = 0x1f01,
   DW_FORM_GNU_str_index = 0x1f02

@@ -100,8 +100,8 @@ bool Google3Addr2line::Prepare() {
 
   SectionMap sections;
   const char *debug_section_names[] = {
-    ".debug_line", ".debug_abbrev", ".debug_info", ".debug_line", ".debug_str",
-    ".debug_ranges", ".debug_addr"
+    ".debug_line", ".debug_abbrev", ".debug_info", ".debug_str",
+    ".debug_ranges", ".debug_addr", ".debug_rnglists"
   };
   for (const char *section_name : debug_section_names) {
     size_t section_size;
@@ -115,12 +115,19 @@ bool Google3Addr2line::Prepare() {
   size_t debug_info_size = 0;
   size_t debug_ranges_size = 0;
   const char *debug_ranges_data = NULL;
+  bool is_dwarf5 = false;
   GetSection(sections, ".debug_info", NULL, &debug_info_size, binary_name_, "");
   GetSection(sections, ".debug_ranges", &debug_ranges_data,
              &debug_ranges_size, binary_name_, "");
+  if (debug_ranges_data == NULL) {
+      GetSection(sections, ".debug_rnglists", &debug_ranges_data,
+          &debug_ranges_size, binary_name_, "");
+      is_dwarf5 = true;
+  }
   AddressRangeList debug_ranges(debug_ranges_data,
                                                 debug_ranges_size,
-                                                &reader);
+                                                &reader,
+                                                is_dwarf5);
   inline_stack_handler_ = new InlineStackHandler(
       &debug_ranges, sections, &reader, sampled_functions_,
       elf_->VaddrOfFirstLoadSegment());

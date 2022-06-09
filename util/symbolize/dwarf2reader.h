@@ -40,11 +40,17 @@ class Dwarf2Handler;
 class LineInfoHandler;
 class DwpReader;
 
+struct AttributeSpec {
+    enum DwarfAttribute name;
+    enum DwarfForm form;
+    // For the special case of DW_FORM_implicit_const
+    uint32 value;
+};
+
 // This maps from a string naming a section to a pair containing a
 // the data for the section, and the size of the section.
 typedef map<string, pair<const char*, uint64> > SectionMap;
-typedef std::list<std::pair<enum DwarfAttribute, enum DwarfForm> >
-    AttributeList;
+typedef std::list<AttributeSpec> AttributeList;
 typedef AttributeList::iterator AttributeIterator;
 typedef AttributeList::const_iterator ConstAttributeIterator;
 
@@ -56,9 +62,13 @@ typedef std::vector<std::pair<int, const char *> > FileVector;
 typedef std::vector<struct LineStateMachine> LogicalsVector;
 
 struct LineInfoHeader {
-  uint64 total_length;
+  uint64 unit_length;  //  initial length
   uint16 version;
-  uint64 prologue_length;
+  
+  uint8 address_size; // DWARF5 Specific field
+  uint8 segment_selector_size; // DWARF5 Specific field
+
+  uint64 header_length;
   uint8 min_insn_length;  // insn stands for instruction
   uint8 max_ops_per_insn;
   bool default_is_stmt;  // stmt stands for statement
@@ -70,6 +80,19 @@ struct LineInfoHeader {
   std::vector<unsigned char> *std_opcode_lengths;
   uint64 logicals_offset;
   uint64 actuals_offset;
+
+  /*
+  * The remaining fields in DWARF5 is not useful for us
+  * Therefore we ignore them:
+  * directory_entry_format_count
+  * directory_entry_format
+  * directories_count
+  * directories
+  * file_name_entry_format_count
+  * file_name_entry_format
+  * file_names_count
+  * file_names
+  */
 };
 
 class LineInfo {
@@ -487,6 +510,12 @@ class CompilationUnit {
 
   // Reads the DWARF2/3 abbreviations for this compilation unit
   void ReadAbbrevs();
+
+  // Reads address size from DWARF header for this compilation unit
+  bool ReadAddressSize(const char** headerptr);
+
+  // Reads .debug_abbrev section offset DWARF header for this compilation unit
+  bool ReadAbbrevOffset(const char** headerptr);
 
   // Processes a single DIE for this compilation unit.
   //
