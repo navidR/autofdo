@@ -205,6 +205,11 @@ class InlineStackHandler: public Dwarf2Handler {
                                         enum DwarfForm form,
                                         uint64 data);
 
+  virtual void ProcessAttributeSigned(uint64 offset,
+                                        enum DwarfAttribute attr,
+                                        enum DwarfForm form,
+                                        int64 data);
+
   void set_directory_names(
       const DirectoryVector *directory_names) {
     directory_names_ = directory_names;
@@ -233,6 +238,13 @@ class InlineStackHandler: public Dwarf2Handler {
   void PopulateSubprogramsByAddress();
 
   ~InlineStackHandler();
+
+  const char* GetRngListsElementAddressByIndex(uint64 addr_base, uint64 rng_index) {
+    return address_ranges_->GetRngListsElementAddressByIndex(addr_base, rng_index);
+  }
+
+  void SetAddrSectionBaseAddress(uint64 addr_base_) { this->addr_base_ = addr_base_; return; }
+  void SetRngListsSectionBaseAddress(uint64 range_base_) { this->range_base_ = range_base_; return; }
 
  private:
   typedef std::map<uint64, SubprogramInfo*> SubprogramsByOffsetMap;
@@ -273,7 +285,11 @@ class InlineStackHandler: public Dwarf2Handler {
   int overlap_count_;
   bool have_two_level_line_tables_;
   bool subprogram_added_by_cu_;
-
+  // The value of the .debug_addr base, if any. We need this value to 
+  // pass it to rnglists.
+  uint64 addr_base_;
+  uint64 range_base_;
+  
   DISALLOW_COPY_AND_ASSIGN(InlineStackHandler);
 };
 
