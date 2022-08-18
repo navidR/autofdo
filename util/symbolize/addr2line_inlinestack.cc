@@ -209,6 +209,7 @@ bool InlineStackHandler::StartDIE(uint64 offset,
       subprogram_added_by_cu_ = true;
       return true;
     }
+    case DW_TAG_skeleton_unit:
     case DW_TAG_compile_unit:
       return true;
     default:
@@ -216,9 +217,13 @@ bool InlineStackHandler::StartDIE(uint64 offset,
   }
 }
 
+// int DEBUGDEBUGDEBUG = 0;
 void InlineStackHandler::EndDIE(uint64 offset) {
+
   DwarfTag die = die_stack_.back();
   die_stack_.pop_back();
+  // printf(">>>>>>>>%d : %s\n", DEBUGDEBUGDEBUG, DwarfTagString(die).c_str());
+  // DEBUGDEBUGDEBUG++;
   if ((die == DW_TAG_subprogram ||
        die == DW_TAG_inlined_subroutine) &&
       !have_two_level_line_tables_) {
@@ -336,14 +341,19 @@ void InlineStackHandler::ProcessAttributeUnsigned(
         CHECK_EQ(0, subprogram_stack_.back()->address_ranges()->size());
         AddressRangeList::RangeList ranges;
 
+        // *****************
         // TODO: check that it's  DW_FORM_data4 and DW_FORM_data8 for earlier DWARF versions.
+        // UPDATE: We don't need to check for DW_FORM_data4 and DW_FORM_data8 since the conversion
+        // of the offset at line 68 (const char* pos = buffer_ + offset;) to char* will take of the 
+        // data width.
+        // Needs investiation.
+        // *****************
         if (form == DW_FORM_sec_offset) {
             address_ranges_->ReadRangeList(data, compilation_unit_base_, &ranges);
         }
         else {
             CHECK(form == DW_FORM_rnglistx);
-            // TODO
-            CHECK(0);
+            address_ranges_->ReadDwarfRngListwithOffsetArray(data, compilation_unit_base_, &ranges, addr_base_);
         }
 
         if (subprogram_stack_.size() == 1) {
@@ -378,7 +388,8 @@ void InlineStackHandler::ProcessAttributeUnsigned(
       default:
         break;
     }
-  } else if (die_stack_.back() == DW_TAG_compile_unit) {
+  } else if (die_stack_.back() == DW_TAG_compile_unit
+             || die_stack_.back() == DW_TAG_skeleton_unit) {
     // The subprogram stack is empty.  This information is therefore
     // describing the compilation unit.
     switch (attr) {
@@ -414,6 +425,47 @@ void InlineStackHandler::ProcessAttributeUnsigned(
         break;
     }
   }
+}
+
+void InlineStackHandler::ProcessAttributeSigned(
+    uint64 offset,
+    enum DwarfAttribute attr,
+    enum DwarfForm form,
+    int64 data) {
+
+    switch (attr) {
+      case DW_AT_call_file: {
+        CHECK(form == DW_FORM_implicit_const);
+
+        if (data == 0 || data >= file_names_->size()) {
+          LOG(WARNING) << "unexpected reference to file_num " << data;
+          break;
+        }
+
+        if (file_names_ != NULL) {
+          const FileVector::value_type &file =
+              (*file_names_)[data];
+          if (directory_names_ != NULL) {
+            if (file.first < directory_names_->size()) {
+              const char *dir = (*directory_names_)[file.first];
+              subprogram_stack_.back()->set_callsite_directory(dir);
+            } else {
+              LOG(WARNING) << "unexpected reference to dir_num " << file.first;
+            }
+          }
+          subprogram_stack_.back()->set_callsite_filename(file.second);
+        }
+        break;
+      }
+      case DW_AT_call_line:
+        CHECK(form == DW_FORM_implicit_const);
+        subprogram_stack_.back()->set_callsite_line(data);
+        break;
+
+      default:
+        break;
+    }      
+
 }
 
 void InlineStackHandler::FindBadSubprograms(

@@ -344,6 +344,13 @@ class ProfileDumper : public SymbolTraverser {
 void ProfileWriter::Dump() {
   StringIndexMap string_index_map;
   StringTableUpdater::Update(*symbol_map_, &string_index_map);
+
+// DEBUGDEBUG
+for(auto& elem : string_index_map)
+{
+   std::cout << elem.first << " " << elem.second << "\n";
+}
+
   SourceProfileLengther length(*symbol_map_);
   printf("Length of symbol map: %d\n", length.length() + 1);
   printf("Number of functions:  %d\n", length.num_functions());

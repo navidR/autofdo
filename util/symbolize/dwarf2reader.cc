@@ -27,6 +27,7 @@
 #include "symbolize/bytereader-inl.h"
 #include "symbolize/elf_reader.h"
 #include "symbolize/line_state_machine.h"
+#include "symbolize/addr2line_inlinestack.h"
 
 namespace devtools_crosstool_autofdo {
 
@@ -38,7 +39,7 @@ CompilationUnit::CompilationUnit(const string& path,
       string_buffer_(NULL), string_buffer_length_(0),
       str_offsets_buffer_(NULL), str_offsets_buffer_length_(0),
       addr_buffer_(NULL), addr_buffer_length_(0),
-      is_split_dwarf_(false), dwo_id_(0), dwo_name_(),
+      is_split_dwarf_(false), dwo_name_(),
       skeleton_dwo_id_(0), ranges_base_(0), addr_base_(0),
       have_checked_for_dwp_(false), dwp_path_(),
       dwp_byte_reader_(NULL), dwp_reader_(NULL), malformed_(false) {}
@@ -51,7 +52,7 @@ CompilationUnit::CompilationUnit(const string& path, const string& dwp_path,
       string_buffer_(NULL), string_buffer_length_(0),
       str_offsets_buffer_(NULL), str_offsets_buffer_length_(0),
       addr_buffer_(NULL), addr_buffer_length_(0),
-      is_split_dwarf_(false), dwo_id_(0), dwo_name_(),
+      is_split_dwarf_(false), dwo_name_(),
       skeleton_dwo_id_(0), ranges_base_(0), addr_base_(0),
       have_checked_for_dwp_(false), dwp_path_(dwp_path),
       dwp_byte_reader_(NULL), dwp_reader_(NULL), malformed_(false) {}
@@ -111,7 +112,6 @@ void CompilationUnit::ReadAbbrevs() {
                                       header_.abbrev_offset;
   const char* abbrevptr = abbrev_start;
   const uint64 abbrev_length = iter->second.second - header_.abbrev_offset;
-
   while (1) {
     CompilationUnit::Abbrev abbrev;
     size_t len;
@@ -130,6 +130,11 @@ void CompilationUnit::ReadAbbrevs() {
     DCHECK(abbrevptr < abbrev_start + abbrev_length);
     abbrev.has_children = reader_->ReadOneByte(abbrevptr);
     abbrevptr += 1;
+
+    // DEBUGDEBUG: REMOVE BEFORE FINAL COMMIT
+    // VLOG(2) << abbrev.number << "> " << DwarfTagString(abbrev.tag) << "\t" << (abbrev.has_children ? "DW_children_yes": "DW_children_no");
+    // printf("%d> %s\t%s\n", abbrev.number, DwarfTagString(abbrev.tag).c_str(), abbrev.has_children ? "DW_children_yes": "DW_children_no");
+
 
     DCHECK(abbrevptr < abbrev_start + abbrev_length);
 
@@ -158,6 +163,12 @@ void CompilationUnit::ReadAbbrevs() {
       spec.name = name;
       spec.form = form;
       spec.value = value;
+
+      // DEBUGDEBUG: REMOVE BEFORE FINAL COMMIT
+      // VLOG(2) << "\t" << DwarfAttributeString(name) << "\t\t" << DwarfFormString(form).c_str() << " = " << value;
+      // printf("\t%s\t %s  : %d\n", DwarfAttributeString(name).c_str(), DwarfFormString(form).c_str(), value);
+
+
 
       abbrev.attributes.push_back(spec);
     }
@@ -189,12 +200,10 @@ const char* CompilationUnit::SkipAttribute(const char* start,
       start += len;
       return SkipAttribute(start, form);
       break;
-
-    case DW_FORM_flag_present:
     case DW_FORM_implicit_const:
+    case DW_FORM_flag_present:
       return start;
       break;
-
     case DW_FORM_data1:
     case DW_FORM_flag:
     case DW_FORM_ref1:
@@ -242,7 +251,6 @@ const char* CompilationUnit::SkipAttribute(const char* start,
       reader_->ReadUnsignedLEB128(start, &len);
       return start + len;
       break;
-
     case DW_FORM_sdata:
       reader_->ReadSignedLEB128(start, &len);
       return start + len;
@@ -259,7 +267,6 @@ const char* CompilationUnit::SkipAttribute(const char* start,
         return start + reader_->OffsetSize();
       }
       break;
-
     case DW_FORM_block1:
       return start + 1 + reader_->ReadOneByte(start);
       break;
@@ -286,6 +293,95 @@ const char* CompilationUnit::SkipAttribute(const char* start,
   LOG(FATAL) << "Unhandled form type";
   return NULL;
 }
+
+void CompilationUnit::ReadDebugOffsetTableHeader(const char* debug_str_offset_ptr,
+                                                 uint64 debug_str_offset_length) {
+  const char* headerptr = debug_str_offset_ptr;
+  size_t initial_length_size;
+
+  if (headerptr + 4 >= debug_str_offset_ptr + debug_str_offset_length) {
+    malformed_ = true;
+    return;
+  }
+
+  const uint64 initial_length = reader_->ReadInitialLength(headerptr, &initial_length_size);
+  headerptr += initial_length_size;
+
+  uint16 version = reader_->ReadTwoBytes(headerptr);
+  if (header_.version != version) {
+    malformed_ = true;
+    return;
+  }
+  headerptr += 2;
+
+  // discard the padding.
+  headerptr += 2;
+
+  str_offsets_buffer_ = headerptr;
+  str_offsets_buffer_length_ = (debug_str_offset_ptr + debug_str_offset_length) - headerptr;
+
+  if(str_offsets_buffer_length_ < 0) {
+    malformed_ = true;
+    return;
+  }                                                 
+}
+
+void CompilationUnit::ReadDebugAddressTableHeader(const char* debug_addr_ptr,
+                                                 uint64 debug_addr_length) {
+  const char* headerptr = debug_addr_ptr;
+  size_t initial_length_size;
+
+  if (headerptr + 4 >= debug_addr_ptr + debug_addr_length) {
+    malformed_ = true;
+    return;
+  }
+
+  const uint64 initial_length = reader_->ReadInitialLength(headerptr, &initial_length_size);
+  headerptr += initial_length_size;
+
+  uint16 version = reader_->ReadTwoBytes(headerptr);
+  headerptr += 2;
+  if (header_.version != version) {
+    malformed_ = true;
+    return;
+  }
+  
+  uint8 address_size = reader_->ReadOneByte(headerptr);
+  headerptr += 1;
+
+  if (address_size != header_.address_size) {
+    LOG(WARNING) << "Address size in .debug_addr header is " << address_size << " while address size in .debug_info header is " << header_.address_size;
+    malformed_ = true;
+    return;
+  }
+
+  uint8 segment_selector_size = reader_->ReadOneByte(headerptr);
+  headerptr += 1;
+
+  addr_buffer_ = headerptr;
+  addr_base_ = headerptr - debug_addr_ptr;
+
+  InlineStackHandler* inline_stack_handler = dynamic_cast<InlineStackHandler*>(handler_);
+  if (inline_stack_handler) {
+    inline_stack_handler->SetAddrSectionBaseAddress(addr_base_);
+  } 
+  else {
+    LOG(WARNING) << "It is not possible to set .debug_addr base address. This means, you might run into trouble yo use .debug_rnglists to calculate the ranges.";
+  }
+
+  addr_buffer_length_ = (debug_addr_ptr + debug_addr_length) - headerptr;
+
+  if(addr_buffer_length_ < 0) {
+    malformed_ = true;
+    return;
+  }   
+}
+
+void CompilationUnit::ReadDebugRangeListTableHeader(const char* debug_rnglists_ptr,
+                                     uint64 debug_rnglists_length) {
+
+  }
+
 
 // Read a DWARF2/3 header.
 // The header is variable length in DWARF3 (and DWARF2 as extended by
@@ -321,13 +417,15 @@ void CompilationUnit::ReadHeader() {
           malformed_ = true;
           return;
       }
-      uint8 unit_type = reader_->ReadOneByte(headerptr);
-      // if (unit_type != 1) // Only support DW_UT_compile
-      // {
-      //     LOG(INFO) << "Only full compilation units, partial compilation units, and type units are supported.";
-      //     malformed_ = true;
-      //     return;
-      // }
+      header_.unit_type = reader_->ReadOneByte(headerptr);
+      if (header_.unit_type != DwarfUnitType::DW_UT_compile &&
+          header_.unit_type != DwarfUnitType::DW_UT_skeleton &&
+          header_.unit_type != DwarfUnitType::DW_UT_split_compile) 
+      {
+          LOG(INFO) << "Only full compilation unit and skeleton unit types are supported.";
+          malformed_ = true;
+          return;
+      }
       headerptr += 1;
   }
 
@@ -341,6 +439,13 @@ void CompilationUnit::ReadHeader() {
       if (!ReadAbbrevOffset(&headerptr))
       {
           return;
+      }
+
+      if (header_.unit_type == DwarfUnitType::DW_UT_skeleton ||
+          header_.unit_type == DwarfUnitType::DW_UT_split_compile)      
+      {
+        header_.dwo_id = reader_->ReadEightBytes(headerptr);
+        headerptr += 8;
       }
   }
   else
@@ -416,7 +521,6 @@ uint64 CompilationUnit::Start(uint64 offset) {
   after_header_ = NULL;
   malformed_ = false;
 
-  dwo_id_ = 0;
   dwo_name_ = NULL;
   skeleton_dwo_id_ = 0;
 
@@ -484,17 +588,42 @@ uint64 CompilationUnit::Start() {
   // Set the string offsets section if we have one.
   iter = sections_.find(".debug_str_offsets");
   if (iter != sections_.end()) {
-    str_offsets_buffer_ = iter->second.first;
-    str_offsets_buffer_length_ = iter->second.second;
+    if(header_.version == 5) {
+      ReadDebugOffsetTableHeader(iter->second.first, iter->second.second);
+    }
+    else {
+      str_offsets_buffer_ = iter->second.first;
+      str_offsets_buffer_length_ = iter->second.second;      
+    }
+  }
+
+  if (malformed()) {
+    return iter->second.second;;
   }
 
   // Set the address section if we have one.
   iter = sections_.find(".debug_addr");
   if (iter != sections_.end()) {
-    addr_buffer_ = iter->second.first;
-    addr_buffer_length_ = iter->second.second;
+    if(header_.version == 5) {
+      ReadDebugAddressTableHeader(iter->second.first, iter->second.second);
+    }
+    else {
+      addr_buffer_ = iter->second.first;
+      addr_buffer_length_ = iter->second.second;      
+    }
   }
 
+  if (malformed()) {
+    return iter->second.second;;
+  }
+
+  // iter = sections_.find(".debug_rnglists");
+  // if (iter != sections_.end()) {
+  //   handler_.
+  //   rng_buffer_ = iter->second.first;
+  //   rng_buffer_length_ = iter->second.second;
+  // }  
+  
   // Now that we have our abbreviations, start processing DIE's.
   ProcessDIEs();
 
@@ -516,8 +645,11 @@ uint64 CompilationUnit::Start() {
 // This is all boring data manipulation and calling of the handler.
 const char* CompilationUnit::ProcessAttribute(
     uint64 dieoffset, const char* start, enum DwarfAttribute attr,
-    enum DwarfForm form) {
+    enum DwarfForm form, uint32 value) {
   size_t len;
+
+  // DEBUGDEBUG: REMOVE BEFORE FINAL COMMIT
+  // printf("\t%s\t%s\n", DwarfAttributeString(attr).c_str(), DwarfFormString(form).c_str());
 
   switch (form) {
     // DW_FORM_indirect is never used because it is such a space
@@ -533,21 +665,33 @@ const char* CompilationUnit::ProcessAttribute(
       ProcessAttributeUnsigned(dieoffset, attr, form, 1);
       return start;
       break;
+    case DW_FORM_strx1:
     case DW_FORM_data1:
     case DW_FORM_flag:
     case DW_FORM_ref1:
+    case DW_FORM_addrx1:
       ProcessAttributeUnsigned(dieoffset, attr, form,
                                          reader_->ReadOneByte(start));
       return start + 1;
       break;
+    case DW_FORM_strx2:
     case DW_FORM_ref2:
     case DW_FORM_data2:
+    case DW_FORM_addrx2:
       ProcessAttributeUnsigned(dieoffset, attr, form,
                                          reader_->ReadTwoBytes(start));
       return start + 2;
       break;
+    case DW_FORM_strx3:
+    case DW_FORM_addrx3:
+      ProcessAttributeUnsigned(dieoffset, attr, form,
+                                         reader_->ReadThreeBytes(start));
+      return start + 3;
+      break;      
+    case DW_FORM_strx4:
     case DW_FORM_ref4:
     case DW_FORM_data4:
+    case DW_FORM_addrx4:
       ProcessAttributeUnsigned(dieoffset, attr, form,
                                          reader_->ReadFourBytes(start));
       return start + 4;
@@ -645,26 +789,68 @@ const char* CompilationUnit::ProcessAttribute(
       const char* str = string_buffer_ + offset;
       ProcessAttributeString(dieoffset, attr, form,
                                        str);
+    // DEBUGDEBUG: REMOVE BEFORE FINAL COMMIT
+      // printf("\t\t\t\t\t%s\n", str);
       return start + reader_->OffsetSize();
       break;
     }
+    case DW_FORM_strx:
     case DW_FORM_GNU_str_index: {
       CHECK(string_buffer_ != NULL);
       CHECK(str_offsets_buffer_ != NULL);
 
       uint64 str_index = reader_->ReadUnsignedLEB128(start, &len);
       const char* offset_ptr =
-          str_offsets_buffer_ + str_index * reader_->OffsetSize();
+          str_offsets_buffer_ + (str_index * reader_->OffsetSize());
       const uint64 offset = reader_->ReadOffset(offset_ptr);
       if (offset >= string_buffer_length_) {
         LOG(WARNING) << "offset is out of range.  offset=" << offset
                      << " string_buffer_length_=" << string_buffer_length_;
         return NULL;
       }
-
       const char* str = string_buffer_ + offset;
+      //DEBUGDEBUG
+      // printf("\t\t\t%s\n", str);
+      // printf("str_offsets_buffer_ : \n");
+      // for(int i = 0; i < str_offsets_buffer_length_; ++i) {
+      //   printf("%hhx ", str_offsets_buffer_[i]);
+      // }
+      // printf("\nEnd of Section\n");
+      // printf("|||||||||||||Table:\n");
+      // for(int _tmp_index = 0; _tmp_index < str_offsets_buffer_length_; ++_tmp_index){
+      //   const char* offset_ptr =
+      //     str_offsets_buffer_ + (_tmp_index) * reader_->OffsetSize();
+
+      // const uint64 offset = reader_->ReadOffset(offset_ptr);
+      // printf("\t\t\tByte value : %hhx \n", reader_->ReadOneByte(offset_ptr));
+      // const char* str = string_buffer_ + offset;
+      //   //DEBUGDEBUG
+      //     printf("\t\t\t %d\t%s\n", _tmp_index, str);
+      // }
+
       ProcessAttributeString(dieoffset, attr, form,
                                        str);
+      return start + len;
+      break;
+    }
+    case DW_FORM_rnglistx: {
+      InlineStackHandler* inline_stack_handler = dynamic_cast<InlineStackHandler*>(handler_);
+      if (!inline_stack_handler) {
+        LOG(FATAL) << "DW_FORM_rnglistx should only be present with dwarf5.";
+      }
+      uint64 rng_index = reader_->ReadUnsignedLEB128(start, &len);
+      uint64 address_ = (uint64) inline_stack_handler->GetRngListsElementAddressByIndex(rng_index);
+      ProcessAttributeUnsigned(dieoffset, attr, form, address_);
+      return start + len;
+      break;
+    }
+    case DW_FORM_addrx: {
+      CHECK(addr_buffer_ != NULL);
+      uint64 addr_index = reader_->ReadUnsignedLEB128(start, &len);
+      const char* addr_ptr =
+          addr_buffer_ + addr_index * reader_->AddressSize(); // addr_base_ has already been added to addr_buffer_
+      ProcessAttributeUnsigned(dieoffset, attr, form,
+                                         reader_->ReadAddress(addr_ptr));
       return start + len;
       break;
     }
@@ -676,6 +862,14 @@ const char* CompilationUnit::ProcessAttribute(
       ProcessAttributeUnsigned(dieoffset, attr, form,
                                          reader_->ReadAddress(addr_ptr));
       return start + len;
+      break;
+    }
+    case DW_FORM_implicit_const: {
+      CHECK(header_.version == 5);
+      // ProcessAttributeSigned(dieoffset, attr, form,
+      //                                 reader_->ReadSignedLEB128(start, &len));
+      ProcessAttributeSigned(dieoffset, attr, form, value);
+      return start;
       break;
     }
     default:
@@ -691,7 +885,9 @@ const char* CompilationUnit::ProcessDIE(uint64 dieoffset,
   for (AttributeList::const_iterator i = abbrev.attributes.begin();
        i != abbrev.attributes.end();
        i++)  {
-    start = ProcessAttribute(dieoffset, start, i->name, i->form);
+      start = ProcessAttribute (
+          dieoffset, start, i->name, i->form,
+          i->form == DwarfForm::DW_FORM_implicit_const ? i->value : 0);
     if (start == NULL) {
       break;
     }
@@ -702,7 +898,7 @@ const char* CompilationUnit::ProcessDIE(uint64 dieoffset,
   // compilation unit.
   if (abbrev.tag == DW_TAG_compile_unit
       && is_split_dwarf_
-      && dwo_id_ != skeleton_dwo_id_) {
+      && header_.dwo_id != skeleton_dwo_id_) {
     LOG(WARNING) << "dwo_id 0x" << std::hex << skeleton_dwo_id_
                  << " does not match .dwo file '" << path_ << "'.";
     return NULL;
@@ -728,6 +924,9 @@ void CompilationUnit::ProcessDIEs() {
 
   stack<uint64> die_stack;
 
+    // DEBUGDEBUG: REMOVE BEFORE FINAL COMMIT
+  // int i = 0;
+
   while (dieptr < (lengthstart + header_.length)) {
     // We give the user the absolute offset from the beginning of
     // debug_info, since they need it to deal with ref_addr forms.
@@ -735,6 +934,12 @@ void CompilationUnit::ProcessDIEs() {
 
     uint64 abbrev_num = reader_->ReadUnsignedLEB128(dieptr, &len);
 
+    // DEBUGDEBUG: REMOVE BEFORE FINAL COMMIT
+    // if (i >= 75) {
+    //   usleep(1);
+    // }
+    // printf(">>>>>>>>>>>>>>>> i:%d  : abbrev_num is %d\n", i, abbrev_num);
+    // i++;
     dieptr += len;
 
     // Abbrev == 0 represents the end of a list of children, or padding between
@@ -750,7 +955,21 @@ void CompilationUnit::ProcessDIEs() {
 
     const Abbrev& abbrev = abbrevs_->at(abbrev_num);
     const enum DwarfTag tag = abbrev.tag;
+
+    // DEBUGDEBUG: REMOVE BEFORE FINAL COMMIT
+    // if(tag == devtools_crosstool_autofdo::DW_TAG_subprogram) {
+    //   // printf("TEST");
+    //   usleep(1);
+    // }
+    // DEBUGDEBUG: REMOVE BEFORE FINAL COMMIT
+    // printf("%d> %s\n", i, DwarfTagString(tag).c_str());
+
+
     if (!handler_->StartDIE(absolute_offset, tag, abbrev.attributes)) {
+    // DEBUGDEBUG: REMOVE BEFORE FINAL COMMIT
+      // printf("\tSkip.\n");
+
+
       dieptr = SkipDIE(dieptr, abbrev);
     } else {
       dieptr = ProcessDIE(absolute_offset, dieptr, abbrev);
@@ -805,13 +1024,13 @@ void CompilationUnit::ProcessSplitDwarf() {
   if (dwp_reader_ != NULL) {
     // If we have a .dwp file, read the debug sections for the requested CU.
     SectionMap sections;
-    dwp_reader_->ReadDebugSectionsForCU(dwo_id_, &sections);
+    dwp_reader_->ReadDebugSectionsForCU(header_.dwo_id, &sections);
     if (!sections.empty()) {
       found_in_dwp = true;
       CompilationUnit dwp_comp_unit(dwp_path_, sections, 0,
                                     dwp_byte_reader_, handler_);
       dwp_comp_unit.SetSplitDwarf(addr_buffer_, addr_buffer_length_, addr_base_,
-                                  ranges_base_, dwo_id_);
+                                  ranges_base_, header_.dwo_id);
       dwp_comp_unit.Start();
       if (dwp_comp_unit.malformed())
         LOG(WARNING) << "File '" << dwp_path_ << "' has mangled "
@@ -831,7 +1050,7 @@ void CompilationUnit::ProcessSplitDwarf() {
         CompilationUnit dwo_comp_unit(dwo_name_, sections, 0, &reader,
                                       handler_);
         dwo_comp_unit.SetSplitDwarf(addr_buffer_, addr_buffer_length_,
-                                    addr_base_, ranges_base_, dwo_id_);
+                                    addr_base_, ranges_base_, header_.dwo_id);
         dwo_comp_unit.Start();
         if (dwo_comp_unit.malformed())
           LOG(WARNING) << "File '" << dwo_name_ << "' has mangled "

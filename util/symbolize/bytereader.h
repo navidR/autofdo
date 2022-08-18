@@ -62,7 +62,11 @@ class ByteReader {
   // number.
   uint16 ReadTwoBytes(const char* buffer) const;
 
-  // Read four bytes from BUFFER and return it as an unsigned 32 bit
+  // Read three bytes from BUFFER and return it as an unsigned 32 bit
+  // number.
+  uint32 ReadThreeBytes(const char* buffer) const;
+
+  // Read four bytes from BUFFER and return it as an unsigned 64 bit
   // number.  This function returns a uint64 so that it is compatible
   // with ReadAddress and ReadOffset.  The number it returns will
   // never be outside the range of an unsigned 32 bit integer.

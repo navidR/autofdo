@@ -32,6 +32,7 @@
 
 #include "base/common.h"
 #include "symbolize/dwarf2enums.h"
+#include "bytereader.h"
 
 namespace devtools_crosstool_autofdo {
 class ElfReader;
@@ -369,7 +370,9 @@ class Dwarf2Handler {
   virtual void ProcessAttributeUnsigned(uint64 offset,
                                         enum DwarfAttribute attr,
                                         enum DwarfForm form,
-                                        uint64 data) { }
+                                        uint64 data) {
+                                          printf("\t\t\t\t%d\n", data);
+                                        }
 
   // Called when we have an attribute with signed data to give to
   // our handler.  The attribute is for the DIE at OFFSET from the
@@ -378,7 +381,9 @@ class Dwarf2Handler {
   virtual void ProcessAttributeSigned(uint64 offset,
                                       enum DwarfAttribute attr,
                                       enum DwarfForm form,
-                                      int64 data) { }
+                                      int64 data) {
+                                        printf("\t\t\t\t%d\n", data);
+                                      }
 
   // Called when we have an attribute with a buffer of data to give to
   // our handler.  The attribute is for the DIE at OFFSET from the
@@ -400,7 +405,9 @@ class Dwarf2Handler {
   virtual void ProcessAttributeString(uint64 offset,
                                       enum DwarfAttribute attr,
                                       enum DwarfForm form,
-                                      const char* data) { }
+                                      const char* data) {
+                                        printf("\t\t\t\t%s\n", data);
+                                      }
 
   // Called when finished processing the DIE at OFFSET.
   // Because DWARF2/3 specifies a tree of DIEs, you may get starts
@@ -503,6 +510,11 @@ class CompilationUnit {
     uint16 version;
     uint64 abbrev_offset;
     uint8 address_size;
+    uint8 unit_type;
+
+    // The value of the DW_AT_GNU_dwo_id attribute, if any.
+    // This attribute has been moved to header in DWARF5
+    uint64 dwo_id; 
   } header_;
 
   // Reads the DWARF2/3 header for this compilation unit.
@@ -516,6 +528,18 @@ class CompilationUnit {
 
   // Reads .debug_abbrev section offset DWARF header for this compilation unit
   bool ReadAbbrevOffset(const char** headerptr);
+
+  // Reads .debug_str_offsets section DWARF header for this compilation unit
+  void ReadDebugOffsetTableHeader(const char* debug_str_offset_ptr,
+                                  uint64 debug_str_offset_length);
+
+  // Reads .debug_addr section DWARF header for this compilation unit
+  void ReadDebugAddressTableHeader(const char* debug_addr_ptr,
+                                  uint64 debug_addr_length);     
+
+  // Reads .debug_rnglists section DWARF header for this compilation unit
+  void ReadDebugRangeListTableHeader(const char* debug_rnglists_ptr,
+                                     uint64 debug_rnglists_length);            
 
   // Processes a single DIE for this compilation unit.
   //
@@ -531,7 +555,8 @@ class CompilationUnit {
   const char* ProcessAttribute(uint64 dieoffset,
                                const char* start,
                                enum DwarfAttribute attr,
-                               enum DwarfForm form);
+                               enum DwarfForm form,
+                               uint32 value = 0);
 
   // Called when we have an attribute with unsigned data to give to
   // our handler.  The attribute is for the DIE at OFFSET from the
@@ -539,21 +564,45 @@ class CompilationUnit {
   // FORM, and the actual data of the attribute is in DATA.
   // If we see a DW_AT_GNU_dwo_id attribute, save the value so that
   // we can find the debug info in a .dwo or .dwp file.
+// int DEBUGDEBUG =0;                              
   void ProcessAttributeUnsigned(uint64 offset,
                                 enum DwarfAttribute attr,
                                 enum DwarfForm form,
                                 uint64 data) {
-    if (attr == DW_AT_GNU_dwo_id)
-      dwo_id_ = data;
-    else if (attr == DW_AT_GNU_addr_base)
+    if (attr == DW_AT_GNU_dwo_id) // In DWARF 5, this attribute has moved to header field.
+      header_.dwo_id = data;
+    else if (attr == DW_AT_GNU_addr_base || attr == DW_AT_addr_base)
       addr_base_ = data;
-    else if (attr == DW_AT_GNU_ranges_base)
+    else if (attr == DW_AT_GNU_ranges_base || attr == DW_AT_rnglists_base)
       ranges_base_ = data;
     // TODO(ccoutant): When we add DW_AT_ranges_base from DWARF-5,
     // that base will apply to DW_AT_ranges attributes in the
     // skeleton CU as well as in the .dwo/.dwp files.
-    else if (attr == DW_AT_ranges && is_split_dwarf_)
-      data += ranges_base_;
+    else if (attr == DW_AT_producer) {
+      CHECK(string_buffer_ != NULL);
+      CHECK(str_offsets_buffer_ != NULL);
+
+      uint64 str_index = data;
+      const char* offset_ptr =
+          str_offsets_buffer_ + str_index * reader_->OffsetSize();
+      const uint64 offset = reader_->ReadOffset(offset_ptr);
+      if (offset >= string_buffer_length_) {
+        LOG(WARNING) << "offset is out of range.  offset=" << offset
+                     << " string_buffer_length_=" << string_buffer_length_;
+        return;
+      }
+
+      const char* str = string_buffer_ + offset;
+      // DEBUGDEBUG
+      // printf("DW_AT_producer : %s\n", str);
+      ProcessAttributeString(offset, attr, form,
+                                       str);
+    }
+    // else if (attr == DW_AT_ranges 
+    //          && is_split_dwarf_)
+    //   data += ranges_base_;
+    // printf("%d\n", DEBUGDEBUG);
+    // DEBUGDEBUG++;
     handler_->ProcessAttributeUnsigned(offset, attr, form, data);
   }
 
@@ -591,7 +640,7 @@ class CompilationUnit {
                               enum DwarfAttribute attr,
                               enum DwarfForm form,
                               const char* data) {
-    if (attr == DW_AT_GNU_dwo_name)
+    if (attr == DW_AT_GNU_dwo_name || attr == DW_AT_dwo_name)
       dwo_name_ = data;
     handler_->ProcessAttributeString(offset, attr, form, data);
   }
@@ -666,9 +715,6 @@ class CompilationUnit {
   // have a ".dwo" suffix, and we will use the ".debug_addr" section
   // associated with the skeleton compilation unit.
   bool is_split_dwarf_;
-
-  // The value of the DW_AT_GNU_dwo_id attribute, if any.
-  uint64 dwo_id_;
 
   // The value of the DW_AT_GNU_dwo_name attribute, if any.
   const char* dwo_name_;
